@@ -401,6 +401,50 @@ Example MCP client configuration:
 }
 ```
 
+### VS Code workspace `.vscode/mcp.json`
+
+VS Code workspace MCP configuration uses a different top-level shape than the
+generic `mcpServers` example above. For local development, the least fragile
+Windows setup is usually to point directly at the virtualenv executable.
+
+```json
+{
+    "servers": {
+        "mtgjson-local-stdio": {
+            "type": "stdio",
+            "command": "${workspaceFolder}\\.venv\\Scripts\\mtgjson-mcp.exe",
+            "args": ["--log-level", "DEBUG"]
+        },
+        "mtgjson-local-http": {
+            "type": "http",
+            "url": "http://127.0.0.1:8765/mcp"
+        }
+    }
+}
+```
+
+Use the `stdio` entry when you want VS Code to launch the server for you.
+Use the `http` entry only if you already started `mtgjson-mcp --transport http`
+separately.
+
+If you prefer not to reference the virtualenv directly, this is a more portable
+fallback:
+
+```json
+{
+    "servers": {
+        "mtgjson": {
+            "type": "stdio",
+            "command": "uv",
+            "args": ["run", "mtgjson-mcp"]
+        }
+    }
+}
+```
+
+The workspace `.vscode/mcp.json` file is a local editor convenience file. This
+repository ignores `.vscode/` by default, so that file is normally not committed.
+
 ### Start over HTTP
 
 ```bash
@@ -412,6 +456,55 @@ The server also exposes:
 
 * `GET /health` for liveness (`status=ok` when the process is up)
 * `GET /ready` for readiness (returns HTTP `200` only when required warm views are ready)
+
+### Choosing stdio vs HTTP in clients
+
+`stdio` is usually the best choice for local editor integrations. The client is
+responsible for starting `mtgjson-mcp` as a local child process and passing a
+command plus arguments.
+
+`http` is usually the best choice when the server should run separately, be
+shared across tools, or be hosted behind an ASGI/web deployment. In that model,
+you start the server first and point clients at the MCP URL:
+
+```bash
+uv run mtgjson-mcp --transport http --host 127.0.0.1 --port 8000 --path /mcp
+```
+
+Different clients use different config shapes even when they connect to the same
+server:
+
+```text
+stdio
+- Best for local editor integrations.
+- Client config usually needs a command plus args.
+- The client owns process startup and shutdown.
+
+HTTP
+- Best when the server should run separately or be shared across tools.
+- Client config usually needs only a URL.
+- You start the server yourself.
+```
+
+Common config differences by client:
+
+* VS Code workspace MCP uses `servers` and typically `"type": "stdio"` or `"type": "http"`.
+* Generic MCP config files and MCP Inspector examples usually use `mcpServers`.
+* Some clients call HTTP transport `http`, while others call it `streamable-http`.
+    The URL is the same; only the config label changes.
+
+Example generic HTTP config for clients that expect `mcpServers`:
+
+```json
+{
+    "mcpServers": {
+        "mtgjson-http": {
+            "type": "streamable-http",
+            "url": "http://127.0.0.1:8000/mcp"
+        }
+    }
+}
+```
 
 ### Warm Profiles and Readiness
 
@@ -465,6 +558,61 @@ Doctor mode runs the same small MCP probe set across the selected transport(s)
 and prints JSON output with parity results. This is useful when editor-side MCP
 tooling is flaky and you need to separate client/session issues from server
 behavior.
+
+### Inspect with `@modelcontextprotocol/inspector`
+
+The MCP Inspector is useful when you want to test tools and resources outside of
+editor integration.
+
+Inspect over stdio by letting the Inspector start `mtgjson-mcp` for you:
+
+```bash
+npx @modelcontextprotocol/inspector uv run mtgjson-mcp
+```
+
+Pass server flags after `--`:
+
+```bash
+npx @modelcontextprotocol/inspector -- uv run mtgjson-mcp --offline --log-level INFO
+```
+
+Inspect over HTTP in two terminals:
+
+```bash
+# Terminal 1: start the MCP server
+uv run mtgjson-mcp --transport http --host 127.0.0.1 --port 8000 --path /mcp
+
+# Terminal 2: start the Inspector UI
+npx @modelcontextprotocol/inspector
+```
+
+Then connect in the Inspector UI with:
+
+```text
+transport: streamable-http
+url: http://127.0.0.1:8000/mcp
+```
+
+You can also launch the Inspector from a config file:
+
+```json
+{
+    "mcpServers": {
+        "mtgjson": {
+            "type": "streamable-http",
+            "url": "http://127.0.0.1:8000/mcp"
+        }
+    }
+}
+```
+
+```bash
+npx @modelcontextprotocol/inspector --config ./mcp.json --server mtgjson
+```
+
+The Inspector uses `mcpServers` config files and labels HTTP transport as
+`streamable-http`. If your editor uses `"type": "http"` instead, keep the same
+URL and adapt only the client-specific config shape.
 
 ### ASGI Deployment Path (Hosted/Production)
 
