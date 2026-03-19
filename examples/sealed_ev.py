@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Sealed EV Calculator — Estimate booster pack expected value using MTGJSON data.
 
-Simulates opening N booster packs for a given set, prices every card pulled and reports expected value statistics.
+Simulates opening N booster packs for a given set, prices every card
+pulled, and reports expected value statistics.
 
 Usage:
     python examples/sealed_ev.py MH3
@@ -269,7 +270,10 @@ def print_summary(
 
     print()
     print(f"  Simulated {n_packs:,} packs ({total_cards:,} cards)")
-    print(f"  Price coverage: {priced_count} / {total_unique} unique cards priced", end="")
+    print(
+        f"  Price coverage: {priced_count} / {total_unique} unique cards priced",
+        end="",
+    )
     if total_unique > 0:
         print(f" ({priced_count / total_unique * 100:.1f}%)")
     else:
@@ -396,9 +400,7 @@ def main() -> None:
 
         # -- Fetch prices --
         print(f"\n  Loading price data for {set_name}...")
-        normal_prices, foil_prices = fetch_price_maps(
-            sdk, set_code, args.provider
-        )
+        normal_prices, foil_prices = fetch_price_maps(sdk, set_code, args.provider)
 
         all_priced = set(normal_prices) | set(foil_prices)
         if not all_priced:
@@ -413,9 +415,7 @@ def main() -> None:
         sim_time = time.time() - t0
 
         # -- Price packs --
-        pack_values = [
-            price_pack(p, normal_prices, foil_prices) for p in all_packs
-        ]
+        pack_values = [price_pack(p, normal_prices, foil_prices) for p in all_packs]
 
         # -- Stats --
         total_cards = sum(len(p) for p in all_packs)
@@ -426,13 +426,17 @@ def main() -> None:
         rarity_data = compute_rarity_ev(
             all_packs, normal_prices, foil_prices, args.packs
         )
-        top_cards = compute_top_cards(
-            all_packs, normal_prices, foil_prices, args.packs
-        )
+        top_cards = compute_top_cards(all_packs, normal_prices, foil_prices, args.packs)
 
         # -- Report --
         print_header(set_name, set_code, args.booster_type, args.provider)
-        print_summary(pack_values, args.packs, total_cards, priced_count, len(seen_uuids))
+        print_summary(
+            pack_values,
+            args.packs,
+            total_cards,
+            priced_count,
+            len(seen_uuids),
+        )
         print_rarity_breakdown(rarity_data, mean_ev)
         print_top_cards(top_cards, args.packs)
         print_histogram(pack_values)

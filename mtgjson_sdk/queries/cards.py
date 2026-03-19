@@ -217,7 +217,7 @@ class CardQuery:
                 q.where_eq("name", name)
 
         if fuzzy_name:
-            q.where_fuzzy("cards.name", fuzzy_name, threshold=0.8)
+            q.where_fuzzy("cards.name", fuzzy_name, threshold=0.75)
 
         if set_code:
             q.where_eq("setCode", set_code)
@@ -259,7 +259,8 @@ class CardQuery:
             q.where_eq("layout", layout)
 
         if is_promo is not None:
-            q.where_eq("isPromo", is_promo)
+            # MTGJSON stores non-promo cards as NULL rather than FALSE.
+            q.where("COALESCE(isPromo, FALSE) = $1", is_promo)
 
         if colors:
             for color in colors:

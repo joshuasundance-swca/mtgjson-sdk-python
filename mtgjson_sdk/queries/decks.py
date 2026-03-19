@@ -21,8 +21,13 @@ class DeckQuery:
     def __init__(self, cache: CacheManager) -> None:
         self._cache = cache
         self._data: list[dict] | None = None
+        self._cache_token = cache.cache_token()
 
     def _ensure(self) -> None:
+        current_token = self._cache.cache_token()
+        if current_token != self._cache_token:
+            self._data = None
+            self._cache_token = current_token
         if self._data is not None:
             return
         try:

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import random
 from typing import Any
 
 from ..connection import Connection
 from ..models.cards import CardSet
 from ..models.submodels import BoosterConfig, BoosterPack, BoosterSheet
+
+logger = logging.getLogger("mtgjson_sdk")
 
 # Views needed for flat booster tables (available from CDN)
 _BOOSTER_VIEWS = (
@@ -37,6 +40,16 @@ class BoosterSimulator:
         self._config_cache: dict[str, dict[str, BoosterConfig] | None] = {}
         # Card data cache: (set_code, booster_type) -> {uuid: row_dict}
         self._card_cache: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+        self._cache_token = self._conn.cache.cache_token()
+
+    def _sync_local_caches(self) -> None:
+        """Reset simulator caches when the active dataset root changes."""
+        current_token = self._conn.cache.cache_token()
+        if current_token == self._cache_token:
+            return
+        self._config_cache.clear()
+        self._card_cache.clear()
+        self._cache_token = current_token
 
     def _ensure_booster_views(self) -> None:
         self._conn.ensure_views(*_BOOSTER_VIEWS)
@@ -51,16 +64,67 @@ class BoosterSimulator:
         back to the nested booster column.
         Results are cached per set code.
         """
+        self._sync_local_caches()
         code = set_code.upper()
         if code in self._config_cache:
             return self._config_cache[code]
 
-        config = self._get_config_from_flat(code)
-        if not config:
-            config = self._get_config_from_nested(code)
+        flat_config = self._get_config_from_flat(code)
+        nested_config: dict[str, BoosterConfig] | None = None
 
-        self._config_cache[code] = config
+        if flat_config:
+            valid_flat_config = {
+                booster_name: booster_config
+                for booster_name, booster_config in flat_config.items()
+                if self._booster_type_is_usable(booster_config)
+            }
+            invalid_types = sorted(set(flat_config) - set(valid_flat_config))
+            if invalid_types:
+                logger.warning(
+                    "Ignoring incomplete flat booster config for %s types: %s",
+                    code,
+                    ", ".join(invalid_types),
+                )
+                nested_config = self._get_config_from_nested(code)
+                if nested_config:
+                    for booster_name in invalid_types:
+                        nested_booster = nested_config.get(booster_name)
+                        if nested_booster and self._booster_type_is_usable(
+                            nested_booster
+                        ):
+                            valid_flat_config[booster_name] = nested_booster
+            config = valid_flat_config or None
+        else:
+            config = None
+
+        if not config:
+            config = (
+                nested_config
+                if nested_config is not None
+                else self._get_config_from_nested(code)
+            )
+
+        if config is not None:
+            self._config_cache[code] = config
         return config
+
+    def _booster_type_is_usable(self, config: BoosterConfig) -> bool:
+        """Return whether a booster config can yield real card pulls."""
+        boosters = config.get("boosters") or []
+        sheets = config.get("sheets") or {}
+        if not boosters or not sheets:
+            return False
+
+        referenced_sheet = False
+        for booster in boosters:
+            for sheet_name, picks in (booster.get("contents") or {}).items():
+                if not picks:
+                    continue
+                referenced_sheet = True
+                sheet = sheets.get(sheet_name)
+                if not sheet or not sheet.get("cards"):
+                    return False
+        return referenced_sheet
 
     def _get_config_from_flat(self, set_code: str) -> dict[str, BoosterConfig] | None:
         """Build booster config from the flat normalized parquet tables."""
@@ -105,9 +169,9 @@ class BoosterSimulator:
             # Group sheet picks by booster index
             idx_contents: dict[int, dict[str, int]] = {}
             for r in bc:
-                idx_contents.setdefault(r["boosterIndex"], {})[r["sheetName"]] = (
-                    r["sheetPicks"]
-                )
+                idx_contents.setdefault(r["boosterIndex"], {})[r["sheetName"]] = r[
+                    "sheetPicks"
+                ]
 
             boosters: list[BoosterPack] = []
             total_weight = 0
@@ -150,9 +214,7 @@ class BoosterSimulator:
 
         return result if result else None
 
-    def _get_config_from_nested(
-        self, set_code: str
-    ) -> dict[str, BoosterConfig] | None:
+    def _get_config_from_nested(self, set_code: str) -> dict[str, BoosterConfig] | None:
         """Fall back to the nested booster column in AllPrintings / test data."""
         self._conn.ensure_views("sets")
         try:
@@ -188,6 +250,7 @@ class BoosterSimulator:
         ``open_pack`` calls resolve cards from this cache instead of
         issuing per-pack queries.
         """
+        self._sync_local_caches()
         key = (set_code.upper(), booster_type)
         if key in self._card_cache:
             return

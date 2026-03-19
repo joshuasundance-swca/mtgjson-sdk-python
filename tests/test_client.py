@@ -38,7 +38,7 @@ def test_refresh_not_stale(sdk_offline):
 
 
 def test_refresh_clears_state(tmp_path):
-    """refresh() resets views and lazy query objects when stale."""
+    """refresh() resets DuckDB state while preserving lazy query handles."""
     sdk = MtgjsonSDK(cache_dir=tmp_path / "cache", offline=True)
     sdk._conn.register_table_from_data(
         "cards",
@@ -69,16 +69,169 @@ def test_refresh_clears_state(tmp_path):
     )
 
     # Access a query to create the lazy instance
-    _ = sdk.cards
-    assert sdk._cards is not None
+    cards = sdk.cards
+    assert sdk._cards is cards
     assert "cards" in sdk._conn._registered_views
+    original_conn = sdk._conn
 
     # Simulate staleness by forcing is_stale to return True
-    sdk._cache.is_stale = lambda: True
+    sdk._cache.is_stale = lambda *, force_remote=False: True
     result = sdk.refresh()
     assert result is True
-    assert sdk._cards is None
+    assert sdk._cards is cards
+    assert sdk._conn is original_conn
     assert len(sdk._conn._registered_views) == 0
+
+    sdk.close()
+
+
+def test_refresh_invalidates_existing_duckdb_state(tmp_path):
+    sdk = MtgjsonSDK(cache_dir=tmp_path / "cache", offline=True)
+    sdk._conn.register_table_from_data(
+        "cards",
+        [
+            {
+                "uuid": "test-001",
+                "name": "Test Card",
+                "type": "Instant",
+                "types": ["Instant"],
+                "subtypes": [],
+                "supertypes": [],
+                "colors": [],
+                "colorIdentity": [],
+                "manaCost": "{R}",
+                "text": "Test",
+                "layout": "normal",
+                "manaValue": 1.0,
+                "setCode": "TST",
+                "number": "1",
+                "borderColor": "black",
+                "frameVersion": "2015",
+                "availability": ["paper"],
+                "finishes": ["nonfoil"],
+                "language": "English",
+                "rarity": "common",
+            },
+        ],
+    )
+
+    assert sdk.sql("SELECT COUNT(*) AS cnt FROM cards")[0]["cnt"] == 1
+
+    sdk._cache.is_stale = lambda *, force_remote=False: True
+    assert sdk.refresh() is True
+
+    with pytest.raises(duckdb.Error):
+        sdk.sql("SELECT COUNT(*) AS cnt FROM cards")
+
+    sdk.close()
+
+
+def test_refresh_preserves_existing_query_handles(tmp_path):
+    sdk = MtgjsonSDK(cache_dir=tmp_path / "cache", offline=True)
+    sdk._conn.register_table_from_data(
+        "cards",
+        [
+            {
+                "uuid": "test-001",
+                "name": "Test Card",
+                "type": "Instant",
+                "types": ["Instant"],
+                "subtypes": [],
+                "supertypes": [],
+                "colors": [],
+                "colorIdentity": [],
+                "manaCost": "{R}",
+                "text": "Test",
+                "layout": "normal",
+                "manaValue": 1.0,
+                "setCode": "TST",
+                "number": "1",
+                "borderColor": "black",
+                "frameVersion": "2015",
+                "availability": ["paper"],
+                "finishes": ["nonfoil"],
+                "language": "English",
+                "rarity": "common",
+            },
+        ],
+    )
+
+    cards = sdk.cards
+    conn = sdk._conn
+    original_raw = conn.raw
+    assert len(cards.search(name="Test Card")) == 1
+
+    sdk._cache.is_stale = lambda *, force_remote=False: True
+    assert sdk.refresh() is True
+
+    sdk._conn.register_table_from_data(
+        "cards",
+        [
+            {
+                "uuid": "test-002",
+                "name": "Refreshed Card",
+                "type": "Instant",
+                "types": ["Instant"],
+                "subtypes": [],
+                "supertypes": [],
+                "colors": [],
+                "colorIdentity": [],
+                "manaCost": "{U}",
+                "text": "Refreshed",
+                "layout": "normal",
+                "manaValue": 1.0,
+                "setCode": "TST",
+                "number": "2",
+                "borderColor": "black",
+                "frameVersion": "2015",
+                "availability": ["paper"],
+                "finishes": ["nonfoil"],
+                "language": "English",
+                "rarity": "common",
+            },
+        ],
+    )
+
+    assert sdk.cards is cards
+    assert sdk._conn is conn
+    assert conn.raw is not original_raw
+    results = cards.search(name="Refreshed Card")
+    assert len(results) == 1
+    assert results[0].uuid == "test-002"
+
+    sdk.close()
+
+
+def test_refresh_reloads_cached_deck_query_when_cache_token_changes(
+    tmp_path, monkeypatch
+):
+    sdk = MtgjsonSDK(cache_dir=tmp_path / "cache", offline=True)
+    deck_payloads = iter(
+        [
+            {"data": [{"code": "A25", "name": "First Deck", "type": "Theme"}]},
+            {"data": [{"code": "TDM", "name": "Second Deck", "type": "Commander"}]},
+        ]
+    )
+
+    monkeypatch.setattr(sdk._cache, "load_json", lambda name: next(deck_payloads))
+
+    decks = sdk.decks
+    first = decks.list(as_dict=True)
+    assert [deck["name"] for deck in first] == ["First Deck"]
+
+    original_token = sdk._cache.cache_token()
+    monkeypatch.setattr(
+        sdk._cache,
+        "cache_token",
+        lambda: "refresh-token"
+        if sdk._cache.is_stale(force_remote=True)
+        else original_token,
+    )
+    sdk._cache.is_stale = lambda *, force_remote=False: force_remote
+
+    assert sdk.refresh() is True
+    second = decks.list(as_dict=True)
+    assert [deck["name"] for deck in second] == ["Second Deck"]
 
     sdk.close()
 
@@ -177,6 +330,40 @@ def test_export_db_contains_all_views(sdk_offline, tmp_path):
         # All views registered in conftest
         for expected in ["cards", "sets", "tokens", "card_identifiers"]:
             assert expected in tables
+    finally:
+        conn.close()
+
+
+def test_export_db_can_limit_exported_views(sdk_offline, tmp_path):
+    """export_db can export only a requested subset of registered views."""
+    out = tmp_path / "export_subset.duckdb"
+    sdk_offline.export_db(out, views=["cards", "sets"])
+
+    conn = duckdb.connect(str(out))
+    try:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main'"
+            ).fetchall()
+        }
+        assert tables == {"cards", "sets"}
+    finally:
+        conn.close()
+
+
+def test_export_db_empty_view_subset_creates_empty_database(sdk_offline, tmp_path):
+    out = tmp_path / "export_none.duckdb"
+    sdk_offline.export_db(out, views=[])
+
+    conn = duckdb.connect(str(out))
+    try:
+        tables = conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main'"
+        ).fetchall()
+        assert tables == []
     finally:
         conn.close()
 
@@ -287,3 +474,28 @@ def test_refresh_stale_with_no_version(tmp_path):
         # No version.txt → is_stale() returns True
         result = sdk.refresh()
         assert result is True
+
+
+def test_refresh_forces_a_fresh_remote_version_check(tmp_path):
+    with MtgjsonSDK(cache_dir=tmp_path / "cache", offline=False) as sdk:
+        sdk._cache._save_version("5.0.0+old")
+        calls: list[bool] = []
+
+        def fake_is_stale(*, force_remote: bool = False) -> bool:
+            calls.append(force_remote)
+            return force_remote
+
+        sdk._cache.is_stale = fake_is_stale
+
+        assert sdk.refresh() is True
+        assert calls == [True]
+
+
+def test_refresh_does_not_activate_new_version_before_download(tmp_path):
+    with MtgjsonSDK(cache_dir=tmp_path / "cache", offline=False) as sdk:
+        sdk._cache._save_version("5.0.0+old")
+        sdk._cache.remote_version = lambda *, force=False: "5.1.0+new"
+        sdk._cache.is_stale = lambda *, force_remote=False: True
+
+        assert sdk.refresh() is True
+        assert sdk._cache._local_version() == "5.0.0+old"

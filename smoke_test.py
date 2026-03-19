@@ -8,10 +8,10 @@ import logging
 import sys
 import time
 
+from mtgjson_sdk import MtgjsonSDK
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("smoke_test")
-
-from mtgjson_sdk import MtgjsonSDK
 
 PASS = 0
 FAIL = 0
@@ -1163,7 +1163,8 @@ def main():
         )
 
         if kw:
-            # Verify structure: should have abilityWords, keywordAbilities, keywordActions
+            # Verify structure: should have abilityWords,
+            # keywordAbilities, keywordActions.
             has_ability = "abilityWords" in kw or any(
                 "ability" in k.lower() for k in kw
             )
