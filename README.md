@@ -442,8 +442,9 @@ fallback:
 }
 ```
 
-The workspace `.vscode/mcp.json` file is a local editor convenience file. This
-repository ignores `.vscode/` by default, so that file is normally not committed.
+VS Code supports sharing workspace `.vscode/mcp.json` in source control. This
+repository currently ignores `.vscode/` by default, so treat that file as a
+local convenience unless you intentionally change the repository's ignore policy.
 
 ### Start over HTTP
 
