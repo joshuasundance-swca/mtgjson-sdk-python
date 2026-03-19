@@ -19,15 +19,27 @@ Unlike traditional SDKs that rely on rate-limited REST APIs, `mtgjson-sdk` imple
 
 ## Install
 
+Core SDK only:
+
 ```bash
 pip install mtgjson-sdk
 ```
 
-With optional extras:
+Install extras when you need additional features:
 
 ```bash
+pip install mtgjson-sdk[mcp]      # MCP server / FastMCP support
 pip install mtgjson-sdk[polars]   # Polars DataFrame support
-pip install mtgjson-sdk[all]      # All optional dependencies
+pip install mtgjson-sdk[all]      # All optional runtime extras (mcp + polars + orjson)
+```
+
+Quick install guide:
+
+```text
+SDK only            -> mtgjson-sdk
+SDK + MCP server    -> mtgjson-sdk[mcp]
+SDK + Polars        -> mtgjson-sdk[polars]
+Everything runtime  -> mtgjson-sdk[all]
 ```
 
 ## Quick Start
@@ -358,6 +370,164 @@ with MtgjsonSDK() as sdk:
     )
 ```
 
+## MCP Server
+
+The project ships with a FastMCP server so agents can use the SDK over either `stdio` or HTTP.
+`fastmcp` is optional and is not installed with the base SDK.
+Install the MCP extra first:
+
+```bash
+pip install mtgjson-sdk[mcp]
+```
+
+If you try to run `mtgjson-mcp` without the extra, the server exits with an install hint.
+
+### Start over stdio
+
+```bash
+uv run mtgjson-mcp
+```
+
+Example MCP client configuration:
+
+```json
+{
+  "mcpServers": {
+    "mtgjson": {
+      "command": "uv",
+      "args": ["run", "mtgjson-mcp"]
+    }
+  }
+}
+```
+
+### Start over HTTP
+
+```bash
+uv run mtgjson-mcp --transport http --host 127.0.0.1 --port 8000 --path /mcp
+```
+
+The MCP endpoint is served at `/mcp`.
+The server also exposes:
+
+* `GET /health` for liveness (`status=ok` when the process is up)
+* `GET /ready` for readiness (returns HTTP `200` only when required warm views are ready)
+
+### Warm Profiles and Readiness
+
+Use a warm profile to make cold-start behavior predictable and to drive `/ready`:
+
+```bash
+# Warm core card/set/token views in the background during startup.
+uv run mtgjson-mcp --transport http --warm-profile base
+
+# Warm core + price views and use readiness to gate traffic.
+uv run mtgjson-mcp --transport http --warm-profile prices
+```
+
+Supported profiles are `base`, `prices`, and `full`.
+If no warm profile is set, `/ready` reports ready immediately (liveness-only mode).
+Long-running admin tools (`prefetch_views`, `export_duckdb`) emit MCP progress updates, and
+`get_server_status` / `mtgjson://server/config` include `download_progress` snapshots.
+
+### Useful options
+
+```bash
+# Use an existing cache directory
+uv run mtgjson-mcp --cache-dir ./data/mtgjson-cache
+
+# Run without CDN access
+uv run mtgjson-mcp --offline
+
+# Enable stateless Streamable HTTP mode for multi-instance deployments
+uv run mtgjson-mcp --transport http --stateless-http
+
+# Show FastMCP's startup banner and raise log verbosity
+uv run mtgjson-mcp --show-banner --log-level INFO
+```
+
+### Transport Doctor
+
+Use the built-in doctor mode to verify round-trip MCP behavior outside editor tooling:
+
+```bash
+# Probe stdio only
+uv run mtgjson-mcp --doctor stdio
+
+# Probe HTTP only
+uv run mtgjson-mcp --doctor http
+
+# Probe both transports and compare the results
+uv run mtgjson-mcp --doctor both
+```
+
+Doctor mode runs the same small MCP probe set across the selected transport(s)
+and prints JSON output with parity results. This is useful when editor-side MCP
+tooling is flaky and you need to separate client/session issues from server
+behavior.
+
+### ASGI Deployment Path (Hosted/Production)
+
+For hosted deployments, middleware, and multi-worker ASGI serving, use the ASGI app factory:
+
+```python
+from fastapi import FastAPI
+
+from mtgjson_sdk.mcp.server import create_asgi_app
+
+mcp_app = create_asgi_app(path="/")
+api = FastAPI(lifespan=mcp_app.lifespan)
+api.mount("/mcp", mcp_app)
+```
+
+Run with Uvicorn/Gunicorn (`uvicorn yourmodule:api --host 0.0.0.0 --port 8000 --workers 4`).
+For horizontally scaled HTTP, prefer stateless mode in CLI/server startup (`--stateless-http`).
+
+### Exposed MCP surface
+
+Resources:
+
+* `mtgjson://server/config`
+* `mtgjson://meta`
+* `mtgjson://views`
+* `mtgjson://cards/{uuid}`
+* `mtgjson://tokens/{uuid}`
+* `mtgjson://sets/{code}`
+* `mtgjson://identifiers/{uuid}`
+* `mtgjson://prices/{uuid}`
+* `mtgjson://skus/{uuid}`
+* `mtgjson://sealed/{uuid}`
+* `mtgjson://enums/{catalog}`
+* `mtgjson://booster/{set_code}/{booster_type}/sheets/{sheet_name}`
+
+Representative tools:
+
+* `search_cards`
+* `search_tokens`
+* `search_sets`
+* `get_set_financial_summary`
+* `find_cards_by_identifier`
+* `get_card_legalities`
+* `list_cards_by_format_status`
+* `get_price_today`
+* `get_price_history`
+* `get_price_trend`
+* `find_cheapest_printing`
+* `list_price_extremes`
+* `list_decks`
+* `list_sealed_products`
+* `get_skus_for_card`
+* `list_booster_types`
+* `open_booster_pack`
+* `open_booster_box`
+* `execute_read_only_sql`
+* `get_server_status`
+* `prefetch_views`
+* `refresh_cache`
+* `export_duckdb`
+
+The SQL tool is intentionally restricted to single-statement `SELECT`, `WITH`, `SHOW`, and `DESCRIBE` queries, and it always enforces a server-side row cap.
+
 ## Development
 
 ```bash
@@ -365,6 +535,13 @@ git clone https://github.com/mtgjson/mtgjson-sdk-python.git
 cd mtgjson-sdk-python
 uv sync --group dev
 uv run pytest
+```
+
+The `dev` group includes test and lint dependencies (including MCP test dependencies).
+If you only want MCP runtime deps without full dev tooling, use:
+
+```bash
+uv sync --extra mcp
 ```
 
 ### Code Style
