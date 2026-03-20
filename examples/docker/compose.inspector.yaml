@@ -1,0 +1,61 @@
+name: mtgjson-mcp-inspector
+
+services:
+  mtgjson-mcp:
+    image: ${IMAGE:-ghcr.io/mtgjson/mtgjson-sdk-python:latest}
+    expose:
+      - "8000"
+    environment:
+      MTGJSON_MCP_TRANSPORT: http
+      MTGJSON_MCP_HOST: 0.0.0.0
+      MTGJSON_MCP_PORT: "8000"
+      MTGJSON_MCP_PATH: /mcp
+      MTGJSON_MCP_CACHE_DIR: /data/mtgjson-cache
+      MTGJSON_MCP_LOG_LEVEL: INFO
+    volumes:
+      - mtgjson-cache:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys, urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5); sys.exit(0)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  mcp-inspector:
+    image: ${MCP_INSPECTOR_IMAGE:-ghcr.io/modelcontextprotocol/inspector:latest}
+    depends_on:
+      mtgjson-mcp:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:6274:6274"
+      - "127.0.0.1:6277:6277"
+    environment:
+      HOST: 0.0.0.0
+      CLIENT_PORT: "6274"
+      SERVER_PORT: "6277"
+      MCP_AUTO_OPEN_ENABLED: "false"
+      MCP_PROXY_FULL_ADDRESS: http://127.0.0.1:6277
+      MCP_PROXY_AUTH_TOKEN: ${MCP_INSPECTOR_TOKEN:-mtgjson-local-dev-token}
+      ALLOWED_ORIGINS: http://127.0.0.1:6274,http://localhost:6274
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:6274', { signal: AbortSignal.timeout(5000) }).then((res) => { if (!res.ok) process.exit(1); }).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mtgjson-cache:
+    name: mtgjson-mcp-cache

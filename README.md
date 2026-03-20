@@ -514,6 +514,33 @@ client at the published URL:
 }
 ```
 
+#### Docker Compose with MCP Inspector
+
+For browser-based MCP debugging, `examples/docker/compose.inspector.yaml`
+starts the MTGJSON server as a private HTTP service and the official MCP
+Inspector as a localhost-bound sidecar:
+
+```bash
+docker compose -f examples/docker/compose.inspector.yaml up
+```
+
+Then open `http://127.0.0.1:6274/` and connect with:
+
+* Transport: `Streamable HTTP`
+* Server URL: `http://mtgjson-mcp:8000/mcp`
+* Proxy auth token: `MCP_INSPECTOR_TOKEN`
+
+If you do not set `MCP_INSPECTOR_TOKEN`, the example defaults to the local-only
+value `mtgjson-local-dev-token`. To reuse a locally built image instead of the
+published tag, set `IMAGE=mtgjson-sdk:local` before `docker compose up`.
+
+The sidecar stack intentionally keeps the MTGJSON HTTP port private to the
+Compose network. If you also want a host-reachable HTTP endpoint on port `8000`,
+use `examples/docker/compose.http.yaml` instead.
+
+`examples/docker/README.md` includes the full quick start, shutdown command, and
+the optional pre-filled Inspector URL.
+
 See [`examples/docker/README.md`](examples/docker/README.md) for ready-to-copy
 example files.
 

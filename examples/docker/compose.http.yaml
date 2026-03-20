@@ -1,6 +1,8 @@
+name: mtgjson-mcp-http
+
 services:
   mtgjson-mcp:
-    image: ghcr.io/mtgjson/mtgjson-sdk-python:latest
+    image: ${IMAGE:-ghcr.io/mtgjson/mtgjson-sdk-python:latest}
     ports:
       - "8000:8000"
     environment:
@@ -27,3 +29,4 @@ services:
 
 volumes:
   mtgjson-cache:
+    name: mtgjson-mcp-cache
