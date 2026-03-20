@@ -8,17 +8,70 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional semver tag to publish, for example v0.1.2.
+        required: false
+        type: string
 
 jobs:
   build-test:
     name: Build Docker Image
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
+
+    outputs:
+      server_name: ${{ steps.metadata.outputs.server_name }}
+      server_version: ${{ steps.metadata.outputs.server_version }}
+      repository_url: ${{ steps.metadata.outputs.repository_url }}
+      image_identifier: ${{ steps.metadata.outputs.image_identifier }}
+      image_repository: ${{ steps.metadata.outputs.image_repository }}
+      image_tag: ${{ steps.metadata.outputs.image_tag }}
+      github_repository: ${{ steps.metadata.outputs.github_repository }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate committed release metadata
+        id: metadata
+        env:
+          RELEASE_TAG_INPUT: ${{ github.event.inputs.release_tag }}
+        shell: bash
+        run: |
+          args=(--github-output "$GITHUB_OUTPUT")
+          expected_version=""
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            expected_version="${GITHUB_REF#refs/tags/v}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${RELEASE_TAG_INPUT}" ]]; then
+            if [[ ! "${RELEASE_TAG_INPUT}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Manual release_tag must be semver-compatible, for example v0.1.2."
+              exit 1
+            fi
+            expected_version="${RELEASE_TAG_INPUT#v}"
+          fi
+          if [[ -n "${expected_version}" ]]; then
+            args+=(--expected-version "${expected_version}")
+          fi
+          python scripts/validate_release_metadata.py "${args[@]}"
+
+      - name: Confirm publish-capable runs use the canonical repository
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_REPOSITORY: ${{ steps.metadata.outputs.github_repository }}
+        shell: bash
+        run: |
+          test "$GITHUB_REPOSITORY" = "$EXPECTED_REPOSITORY"
+
+      - name: Confirm manual publish runs from main
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          test "$GITHUB_REF_NAME" = "main"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -34,48 +87,75 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            VERSION=test
+            VERSION=${{ steps.metadata.outputs.server_version }}
             VCS_REF=${{ github.sha }}
             BUILD_DATE=1970-01-01T00:00:00Z
 
-      - name: Verify MCP ownership label
+      - name: Verify image metadata and host contract
+        env:
+          SERVER_NAME: ${{ steps.metadata.outputs.server_name }}
+          SERVER_VERSION: ${{ steps.metadata.outputs.server_version }}
+          REPOSITORY_URL: ${{ steps.metadata.outputs.repository_url }}
+        shell: bash
         run: |
-          test "$(docker inspect --format '{{ index .Config.Labels "io.modelcontextprotocol.server.name" }}' mtgjson-sdk:test)" = "io.github.mtgjson/mtgjson-sdk-python"
+          test "$(docker inspect --format '{{ index .Config.Labels "io.modelcontextprotocol.server.name" }}' mtgjson-sdk:test)" = "$SERVER_NAME"
+          test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' mtgjson-sdk:test)" = "$SERVER_VERSION"
+          test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' mtgjson-sdk:test)" = "$REPOSITORY_URL"
 
-      - name: Verify CLI help exposes Docker env defaults
+          image_user="$(docker inspect --format '{{ .Config.User }}' mtgjson-sdk:test)"
+          test -n "$image_user"
+          test "$image_user" != "0"
+          test "$image_user" != "root"
+          test "$(docker inspect --format '{{ json .Config.Entrypoint }}' mtgjson-sdk:test)" = '["mtgjson-mcp"]'
+
+      - name: Smoke CLI contract
+        env:
+          SERVER_VERSION: ${{ steps.metadata.outputs.server_version }}
+        shell: bash
         run: |
           docker run --rm mtgjson-sdk:test --help > help.txt
+          grep -q -- '--transport' help.txt
+          grep -q 'Use stdio' help.txt
           grep -q 'MTGJSON_MCP_TRANSPORT' help.txt
           grep -q 'MTGJSON_MCP_CACHE_DIR' help.txt
 
+          docker run --rm mtgjson-sdk:test --version > version.txt
+          grep -qx "mtgjson-mcp $SERVER_VERSION" version.txt
+
+      - name: Scan container image
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/trivy-cache"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${RUNNER_TEMP}/trivy-cache:/root/.cache/" \
+            aquasec/trivy:0.69.3 \
+            image \
+            --scanners vuln \
+            --exit-code 1 \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL \
+            mtgjson-sdk:test
+
   publish-image:
     name: Publish Container Image
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: build-test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
 
     outputs:
-      image-name: ${{ steps.image-name.outputs.value }}
-      version: ${{ steps.version.outputs.value }}
+      image_identifier: ${{ needs.build-test.outputs.image_identifier }}
+      server_version: ${{ needs.build-test.outputs.server_version }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Normalize image name
-        id: image-name
-        shell: bash
-        run: |
-          echo "value=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-
-      - name: Set release version
-        id: version
-        shell: bash
-        run: |
-          echo "value=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        with:
+          persist-credentials: false
 
       - name: Set build timestamp
         id: build-date
@@ -100,11 +180,11 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ steps.image-name.outputs.value }}
+          images: ${{ needs.build-test.outputs.image_repository }}
           flavor: |
             latest=auto
           tags: |
-            type=semver,pattern={{version}}
+            type=raw,value=${{ needs.build-test.outputs.server_version }}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=sha,prefix=sha-
@@ -123,15 +203,16 @@ jobs:
           sbom: true
           provenance: mode=max
           build-args: |
-            VERSION=${{ steps.version.outputs.value }}
+            VERSION=${{ needs.build-test.outputs.server_version }}
             VCS_REF=${{ github.sha }}
             BUILD_DATE=${{ steps.build-date.outputs.value }}
 
   publish-mcp-registry:
     name: Publish MCP Registry Metadata
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.publish-image.result == 'success'
     needs: publish-image
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write
@@ -139,38 +220,37 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          persist-credentials: false
 
-      - name: Set release metadata in server.json
-        env:
-          IMAGE_NAME: ${{ needs.publish-image.outputs.image-name }}
-          VERSION: ${{ needs.publish-image.outputs.version }}
+      - name: Validate committed release metadata
+        shell: bash
         run: |
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
+          python scripts/validate_release_metadata.py \
+            --expected-version "${{ needs.publish-image.outputs.server_version }}"
 
-          path = Path("server.json")
-          payload = json.loads(path.read_text(encoding="utf-8"))
-          payload["version"] = os.environ["VERSION"]
-          image = f"{os.environ['IMAGE_NAME']}:{os.environ['VERSION']}"
-          for package in payload.get("packages", []):
-              if package.get("registryType") == "oci":
-                  package["identifier"] = image
-          path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-          PY
+      - name: Verify published image is publicly accessible
+        env:
+          IMAGE_IDENTIFIER: ${{ needs.publish-image.outputs.image_identifier }}
+        shell: bash
+        run: |
+          for attempt in {1..6}; do
+            if docker manifest inspect "$IMAGE_IDENTIFIER" > /dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Published image must be anonymously accessible before registry publish: $IMAGE_IDENTIFIER"
+          exit 1
 
       - name: Install mcp-publisher
+        shell: bash
         run: |
-          python -m pip install --upgrade pip mcp-publisher
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          chmod +x ./mcp-publisher
 
       - name: Authenticate to MCP Registry
-        run: mcp-publisher login github-oidc
+        run: ./mcp-publisher login github-oidc
 
       - name: Publish server metadata
-        run: mcp-publisher publish
+        run: ./mcp-publisher publish

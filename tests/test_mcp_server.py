@@ -85,6 +85,24 @@ def test_main_prints_clean_missing_dependency_hint(monkeypatch, argv):
     assert "Traceback" not in stderr.getvalue()
 
 
+def test_main_prints_version_without_loading_mcp_dependencies(monkeypatch, capsys):
+    import mtgjson_sdk.mcp.server as mcp_server
+
+    monkeypatch.setattr(
+        mcp_server,
+        "_MCP_IMPORT_ERROR",
+        ModuleNotFoundError("No module named 'fastmcp'"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        mcp_server.main(["--version"])
+
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == f"mtgjson-mcp {mcp_server._current_package_version()}"
+    assert captured.err == ""
+
+
 def test_top_level_mcp_server_shim_re_exports_public_api():
     import mtgjson_sdk.mcp.server as nested_mcp_server
     import mtgjson_sdk.mcp_server as shim_mcp_server
@@ -1217,6 +1235,31 @@ def test_main_http_passes_stateless_http_flag(monkeypatch):
     assert run_kwargs["transport"] == "http"
     assert run_kwargs["path"] == "/custom"
     assert run_kwargs["stateless_http"] is True
+
+
+def test_resolve_cli_defaults_uses_stdio_when_transport_is_unspecified(monkeypatch):
+    import mtgjson_sdk.mcp.server as mcp_server
+
+    for env_var in (
+        mcp_server.ENV_TRANSPORT,
+        mcp_server.ENV_HOST,
+        mcp_server.ENV_PORT,
+        mcp_server.ENV_PATH,
+        mcp_server.ENV_WARM_PROFILE,
+        mcp_server.ENV_STATELESS_HTTP,
+        mcp_server.ENV_CACHE_DIR,
+        mcp_server.ENV_OFFLINE,
+        mcp_server.ENV_TIMEOUT,
+        mcp_server.ENV_LOG_LEVEL,
+    ):
+        monkeypatch.delenv(env_var, raising=False)
+
+    args = mcp_server.build_arg_parser().parse_args([])
+    resolved = mcp_server._resolve_cli_defaults(args)
+
+    assert resolved.transport == "stdio"
+    assert resolved.host == mcp_server.DEFAULT_HTTP_HOST
+    assert resolved.path == mcp_server.DEFAULT_HTTP_PATH
 
 
 def test_main_doctor_short_circuits_server_run(monkeypatch):

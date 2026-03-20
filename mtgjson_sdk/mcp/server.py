@@ -3645,6 +3645,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_current_package_version()}",
+    )
+    parser.add_argument(
         "--transport",
         choices=("stdio", "http"),
         default=None,
