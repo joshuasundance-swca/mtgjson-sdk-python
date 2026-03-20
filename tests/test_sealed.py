@@ -1,5 +1,8 @@
 """Tests for the sealed product query module."""
 
+import duckdb
+import pytest
+
 from conftest import SAMPLE_SETS
 
 
@@ -70,3 +73,75 @@ def test_sealed_list_as_dataframe_returns_empty_dataframe_when_sources_lack_seal
     assert result is sentinel
     assert "sealedProduct" in captured["sql"]
     assert "WHERE FALSE" in captured["sql"]
+
+
+def test_sealed_list_falls_back_on_duckdb_error(sdk_offline, monkeypatch):
+    monkeypatch.setattr(
+        sdk_offline.sealed,
+        "_source_has_sealed_product",
+        lambda _: True,
+    )
+
+    def fake_list_from_source(source: str, **kwargs):
+        if source == "sets":
+            raise duckdb.Error("missing sealedProduct")
+        return [{"uuid": "sealed-uuid-001", "setCode": "A25"}]
+
+    monkeypatch.setattr(sdk_offline.sealed, "_list_from_source", fake_list_from_source)
+
+    assert sdk_offline.sealed.list(set_code="A25") == [
+        {"uuid": "sealed-uuid-001", "setCode": "A25"}
+    ]
+
+
+def test_sealed_list_propagates_unexpected_errors(sdk_offline, monkeypatch):
+    monkeypatch.setattr(
+        sdk_offline.sealed,
+        "_source_has_sealed_product",
+        lambda _: True,
+    )
+    monkeypatch.setattr(
+        sdk_offline.sealed,
+        "_list_from_source",
+        lambda source, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        sdk_offline.sealed.list(set_code="A25")
+
+
+def test_sealed_get_falls_back_on_duckdb_error(sdk_offline, monkeypatch):
+    monkeypatch.setattr(
+        sdk_offline.sealed,
+        "_source_has_sealed_product",
+        lambda _: True,
+    )
+
+    def fake_get_from_source(source: str, uuid: str):
+        if source == "sets":
+            raise duckdb.Error("missing sealedProduct")
+        return {"uuid": uuid, "name": "Fallback Product", "setCode": "A25"}
+
+    monkeypatch.setattr(sdk_offline.sealed, "_get_from_source", fake_get_from_source)
+
+    assert sdk_offline.sealed.get("sealed-uuid-001") == {
+        "uuid": "sealed-uuid-001",
+        "name": "Fallback Product",
+        "setCode": "A25",
+    }
+
+
+def test_sealed_get_propagates_unexpected_errors(sdk_offline, monkeypatch):
+    monkeypatch.setattr(
+        sdk_offline.sealed,
+        "_source_has_sealed_product",
+        lambda _: True,
+    )
+    monkeypatch.setattr(
+        sdk_offline.sealed,
+        "_get_from_source",
+        lambda source, uuid: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        sdk_offline.sealed.get("sealed-uuid-001")

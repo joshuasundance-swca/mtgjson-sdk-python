@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import duckdb
+
 from .._sql import SQLBuilder
 from ..connection import Connection
 
@@ -151,8 +153,8 @@ class SealedQuery:
                     limit=limit,
                     as_dataframe=as_dataframe,
                 )
-            except Exception:
-                # sealedProduct may be absent in flat sets.parquet; fall back.
+            except (KeyError, duckdb.Error):
+                # Source/schema issues can legitimately require falling back.
                 continue
 
             if as_dataframe or products or source == "all_printings":
@@ -182,7 +184,7 @@ class SealedQuery:
                 if not self._source_has_sealed_product(source):
                     continue
                 product = self._get_from_source(source, uuid)
-            except Exception:
+            except (KeyError, duckdb.Error):
                 continue
             if product is not None or source == "all_printings":
                 return product
