@@ -33,12 +33,17 @@ dependencies = [
 Homepage = "https://mtgjson.com"
 Repository = "https://github.com/mtgjson/mtgjson-sdk-python"
 
+[project.scripts]
+mtgjson-mcp = "mtgjson_sdk.mcp.server:main"
+
 [project.optional-dependencies]
+mcp = ["fastmcp>=3.1.1,<4.0"]
 polars = ["polars>=1.0"]
-all = ["polars>=1.0", "orjson>=3.9"]
+all = ["fastmcp>=3.1.1,<4.0", "polars>=1.0", "orjson>=3.9"]
 
 [dependency-groups]
 dev = [
+    "fastmcp>=3.1.1,<4.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pyarrow>=14.0",

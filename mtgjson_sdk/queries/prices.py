@@ -89,7 +89,10 @@ class PriceQuery:
         parts = [
             "SELECT * FROM all_prices_today",
             "WHERE uuid = $1",
-            "AND date = (SELECT MAX(p2.date) FROM all_prices_today p2 WHERE p2.uuid = $1)",
+            (
+                "AND date = (SELECT MAX(p2.date) FROM all_prices_today p2 "
+                "WHERE p2.uuid = $1)"
+            ),
         ]
         params: list[Any] = [uuid]
         idx = 2
@@ -295,7 +298,7 @@ class PriceQuery:
         self._ensure()
         if not self._has_prices():
             return []
-        
+
         self._conn.ensure_views("cards")
 
         sql = (

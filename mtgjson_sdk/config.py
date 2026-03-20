@@ -45,6 +45,7 @@ JSON_FILES: dict[str, str] = {
     "deck_list": "DeckList.json",
     "enum_values": "EnumValues.json",
     "meta": "Meta.json",
+    "set_list": "SetList.json",
 }
 
 #: URL for the MTGJSON version metadata endpoint.

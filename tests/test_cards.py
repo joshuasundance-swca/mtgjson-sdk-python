@@ -119,6 +119,27 @@ def test_search_by_availability(sdk_offline):
     assert len(cards) == 3
 
 
+def test_search_by_is_promo_false_treats_null_as_non_promo(sdk_offline):
+    sdk_offline._conn.raw.execute(
+        "UPDATE cards SET isPromo = TRUE WHERE uuid = 'card-uuid-003'"
+    )
+
+    cards = sdk_offline.cards.search(is_promo=False)
+
+    assert {card.uuid for card in cards} == {"card-uuid-001", "card-uuid-002"}
+
+
+def test_search_by_is_promo_true(sdk_offline):
+    sdk_offline._conn.raw.execute(
+        "UPDATE cards SET isPromo = TRUE WHERE uuid = 'card-uuid-003'"
+    )
+
+    cards = sdk_offline.cards.search(is_promo=True)
+
+    assert len(cards) == 1
+    assert cards[0].uuid == "card-uuid-003"
+
+
 def test_search_by_language(sdk_offline):
     cards = sdk_offline.cards.search(language="English")
     assert len(cards) == 3

@@ -124,11 +124,26 @@ class Connection:
         self.cache = cache
         self._conn: duckdb.DuckDBPyConnection = duckdb.connect(":memory:")
         self._registered_views: set[str] = set()
+        self._cache_token = cache.cache_token()
 
     def close(self) -> None:
         """Close the underlying DuckDB connection and free resources."""
         if self._conn:
             self._conn.close()
+
+    def reset(self) -> None:
+        """Recreate the in-memory DuckDB connection and clear all views."""
+
+        if self._conn:
+            self._conn.close()
+        self._conn = duckdb.connect(":memory:")
+        self._registered_views.clear()
+        self._cache_token = self.cache.cache_token()
+
+    def _sync_with_cache(self) -> None:
+        current_token = self.cache.cache_token()
+        if current_token != self._cache_token:
+            self.reset()
 
     def _ensure_view(self, view_name: str) -> None:
         """Lazily register a parquet file as a DuckDB view.
@@ -141,14 +156,13 @@ class Connection:
         cache), the view is silently skipped.  Downstream queries that
         reference a missing view will receive empty results or None.
         """
+        self._sync_with_cache()
         if view_name in self._registered_views:
             return
         try:
             path = self.cache.ensure_parquet(view_name)
         except FileNotFoundError:
-            logger.debug(
-                "Skipping view %s: parquet file not available", view_name
-            )
+            logger.debug("Skipping view %s: parquet file not available", view_name)
             return
         # Use forward slashes for DuckDB compatibility
         path_str = str(path).replace("\\", "/")
@@ -324,8 +338,18 @@ class Connection:
         Args:
             *view_names: View names to register (e.g. ``"cards"``, ``"sets"``).
         """
+        self._sync_with_cache()
         for name in view_names:
             self._ensure_view(name)
+
+    def view_has_column(self, view_name: str, column_name: str) -> bool:
+        """Return whether a registered or cache-backed view exposes a column."""
+
+        self.ensure_views(view_name)
+        if view_name not in self._registered_views:
+            return False
+        rows = self.execute(f"DESCRIBE {view_name}")
+        return any(row.get("column_name") == column_name for row in rows)
 
     def execute(
         self,
@@ -345,6 +369,7 @@ class Connection:
         Returns:
             List of row dicts.
         """
+        self._sync_with_cache()
         if params:
             result = self._conn.execute(sql, params)
         else:
@@ -381,6 +406,7 @@ class Connection:
             JSON array string (e.g. ``'[{"name":"Bolt",...},...]'``).
             Returns ``'[]'`` for empty result sets.
         """
+        self._sync_with_cache()
         wrapped = f"SELECT to_json(list(sub)) FROM ({sql}) sub"
         if params:
             result = self._conn.execute(wrapped, params)
@@ -427,6 +453,7 @@ class Connection:
         Returns:
             The scalar value, or None if the result set is empty.
         """
+        self._sync_with_cache()
         if params:
             result = self._conn.execute(sql, params)
         else:
@@ -447,6 +474,7 @@ class Connection:
         Raises:
             ImportError: If ``polars`` is not installed.
         """
+        self._sync_with_cache()
         try:
             import polars as pl
         except ImportError as err:

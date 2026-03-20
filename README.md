@@ -19,15 +19,27 @@ Unlike traditional SDKs that rely on rate-limited REST APIs, `mtgjson-sdk` imple
 
 ## Install
 
+Core SDK only:
+
 ```bash
 pip install mtgjson-sdk
 ```
 
-With optional extras:
+Install extras when you need additional features:
 
 ```bash
+pip install mtgjson-sdk[mcp]      # MCP server / FastMCP support
 pip install mtgjson-sdk[polars]   # Polars DataFrame support
-pip install mtgjson-sdk[all]      # All optional dependencies
+pip install mtgjson-sdk[all]      # All optional runtime extras (mcp + polars + orjson)
+```
+
+Quick install guide:
+
+```text
+SDK only            -> mtgjson-sdk
+SDK + MCP server    -> mtgjson-sdk[mcp]
+SDK + Polars        -> mtgjson-sdk[polars]
+Everything runtime  -> mtgjson-sdk[all]
 ```
 
 ## Quick Start
@@ -358,6 +370,456 @@ with MtgjsonSDK() as sdk:
     )
 ```
 
+## MCP Server
+
+The project ships with a FastMCP server so agents can use the SDK over either `stdio` or HTTP.
+`fastmcp` is optional and is not installed with the base SDK.
+Install the MCP extra first:
+
+```bash
+pip install mtgjson-sdk[mcp]
+```
+
+If you try to run `mtgjson-mcp` without the extra, the server exits with an install hint.
+
+### Start over stdio
+
+```bash
+uv run mtgjson-mcp
+```
+
+Example MCP client configuration:
+
+```json
+{
+  "mcpServers": {
+    "mtgjson": {
+      "command": "uv",
+      "args": ["run", "mtgjson-mcp"]
+    }
+  }
+}
+```
+
+### Run with Docker
+
+The published container image supports the same two transports as the local CLI:
+
+* `stdio` is the default and is the best fit for MCP clients that can launch
+  Docker containers directly.
+* HTTP is opt-in for shared, long-running, or remote deployments.
+
+The examples below use:
+
+```bash
+IMAGE=ghcr.io/mtgjson/mtgjson-sdk-python:latest
+```
+
+If you publish the image somewhere else, replace `IMAGE` with your registry tag.
+
+#### Docker stdio (ephemeral)
+
+```bash
+docker run --rm -i $IMAGE
+```
+
+Use `-i` so Docker keeps `STDIN` open for MCP traffic.
+You usually do **not** want `-t` for protocol traffic.
+
+#### Docker stdio with a persistent cache
+
+MTGJSON data is cached locally inside the container.
+For repeated Docker launches, mount a volume so the dataset survives across runs:
+
+```bash
+docker run --rm -i \
+  -v mtgjson-cache:/data \
+  -e MTGJSON_MCP_CACHE_DIR=/data/mtgjson-cache \
+  $IMAGE
+```
+
+Without a persistent cache, each fresh container may need to download data again.
+
+#### Docker HTTP mode
+
+Use HTTP mode when the server should run separately and multiple tools should
+connect to the same MCP endpoint:
+
+```bash
+docker run --rm \
+  -p 8000:8000 \
+  -v mtgjson-cache:/data \
+  -e MTGJSON_MCP_TRANSPORT=http \
+  -e MTGJSON_MCP_HOST=0.0.0.0 \
+  -e MTGJSON_MCP_PORT=8000 \
+  -e MTGJSON_MCP_PATH=/mcp \
+  -e MTGJSON_MCP_CACHE_DIR=/data/mtgjson-cache \
+  $IMAGE
+```
+
+The MCP endpoint is then available at `http://127.0.0.1:8000/mcp`.
+
+Warm profiles are most useful for long-running HTTP containers or repeated runs
+against a shared cache volume:
+
+```bash
+docker run --rm \
+  -p 8000:8000 \
+  -v mtgjson-cache:/data \
+  -e MTGJSON_MCP_TRANSPORT=http \
+  -e MTGJSON_MCP_HOST=0.0.0.0 \
+  -e MTGJSON_MCP_PORT=8000 \
+  -e MTGJSON_MCP_PATH=/mcp \
+  -e MTGJSON_MCP_CACHE_DIR=/data/mtgjson-cache \
+  -e MTGJSON_MCP_WARM_PROFILE=base \
+  $IMAGE
+```
+
+#### Generic MCP client config that shells out to Docker
+
+Some MCP clients have Docker-native UI, while others still model Docker as a
+subprocess launch. This generic config works well for the latter:
+
+```json
+{
+  "mcpServers": {
+    "mtgjson-docker": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "-v",
+        "mtgjson-cache:/data",
+        "-e",
+        "MTGJSON_MCP_CACHE_DIR=/data/mtgjson-cache",
+        "ghcr.io/mtgjson/mtgjson-sdk-python:latest"
+      ]
+    }
+  }
+}
+```
+
+To connect over HTTP instead, start the container separately and point the
+client at the published URL:
+
+```json
+{
+  "mcpServers": {
+    "mtgjson-http": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+#### Docker Compose with MCP Inspector
+
+For browser-based MCP debugging, `examples/docker/compose.inspector.yaml`
+starts the MTGJSON server as a private HTTP service and the official MCP
+Inspector as a localhost-bound sidecar:
+
+```bash
+docker compose -f examples/docker/compose.inspector.yaml up
+```
+
+Then open `http://127.0.0.1:6274/` and connect with:
+
+* Transport: `Streamable HTTP`
+* Server URL: `http://mtgjson-mcp:8000/mcp`
+* Proxy auth token: `MCP_INSPECTOR_TOKEN`
+
+If you do not set `MCP_INSPECTOR_TOKEN`, the example defaults to the local-only
+value `mtgjson-local-dev-token`. To reuse a locally built image instead of the
+published tag, set `IMAGE=mtgjson-sdk:local` before `docker compose up`.
+
+The sidecar stack intentionally keeps the MTGJSON HTTP port private to the
+Compose network. If you also want a host-reachable HTTP endpoint on port `8000`,
+use `examples/docker/compose.http.yaml` instead.
+
+`examples/docker/README.md` includes the full quick start, shutdown command, and
+the optional pre-filled Inspector URL.
+
+See [`examples/docker/README.md`](examples/docker/README.md) for ready-to-copy
+example files.
+
+### VS Code workspace `.vscode/mcp.json`
+
+VS Code workspace MCP configuration uses a different top-level shape than the
+generic `mcpServers` example above. For local development, the least fragile
+Windows setup is usually to point directly at the virtualenv executable.
+
+```json
+{
+    "servers": {
+        "mtgjson-local-stdio": {
+            "type": "stdio",
+            "command": "${workspaceFolder}\\.venv\\Scripts\\mtgjson-mcp.exe",
+            "args": ["--log-level", "DEBUG"]
+        },
+        "mtgjson-local-http": {
+            "type": "http",
+            "url": "http://127.0.0.1:8765/mcp"
+        }
+    }
+}
+```
+
+Use the `stdio` entry when you want VS Code to launch the server for you.
+Use the `http` entry only if you already started `mtgjson-mcp --transport http`
+separately.
+
+If you prefer not to reference the virtualenv directly, this is a more portable
+fallback:
+
+```json
+{
+    "servers": {
+        "mtgjson": {
+            "type": "stdio",
+            "command": "uv",
+            "args": ["run", "mtgjson-mcp"]
+        }
+    }
+}
+```
+
+VS Code supports sharing workspace `.vscode/mcp.json` in source control. This
+repository currently ignores `.vscode/` by default, so treat that file as a
+local convenience unless you intentionally change the repository's ignore policy.
+
+### Start over HTTP
+
+```bash
+uv run mtgjson-mcp --transport http --host 127.0.0.1 --port 8000 --path /mcp
+```
+
+The MCP endpoint is served at `/mcp`.
+The server also exposes:
+
+* `GET /health` for liveness (`status=ok` when the process is up)
+* `GET /ready` for readiness (returns HTTP `200` only when required warm views are ready)
+
+### Choosing stdio vs HTTP in clients
+
+`stdio` is usually the best choice for local editor integrations. The client is
+responsible for starting `mtgjson-mcp` as a local child process and passing a
+command plus arguments.
+
+`http` is usually the best choice when the server should run separately, be
+shared across tools, or be hosted behind an ASGI/web deployment. In that model,
+you start the server first and point clients at the MCP URL:
+
+```bash
+uv run mtgjson-mcp --transport http --host 127.0.0.1 --port 8000 --path /mcp
+```
+
+Different clients use different config shapes even when they connect to the same
+server:
+
+```text
+stdio
+- Best for local editor integrations.
+- Client config usually needs a command plus args.
+- The client owns process startup and shutdown.
+
+HTTP
+- Best when the server should run separately or be shared across tools.
+- Client config usually needs only a URL.
+- You start the server yourself.
+```
+
+Common config differences by client:
+
+* VS Code workspace MCP uses `servers` and typically `"type": "stdio"` or `"type": "http"`.
+* Generic MCP config files and MCP Inspector examples usually use `mcpServers`.
+* Some clients call HTTP transport `http`, while others call it `streamable-http`.
+    The URL is the same; only the config label changes.
+
+Example generic HTTP config for clients that expect `mcpServers`:
+
+```json
+{
+    "mcpServers": {
+        "mtgjson-http": {
+            "type": "streamable-http",
+            "url": "http://127.0.0.1:8000/mcp"
+        }
+    }
+}
+```
+
+### Warm Profiles and Readiness
+
+Use a warm profile to make cold-start behavior predictable and to drive `/ready`:
+
+```bash
+# Warm core card/set/token views in the background during startup.
+uv run mtgjson-mcp --transport http --warm-profile base
+
+# Warm core + price views and use readiness to gate traffic.
+uv run mtgjson-mcp --transport http --warm-profile prices
+```
+
+Supported profiles are `base`, `prices`, and `full`.
+If no warm profile is set, `/ready` reports ready immediately (liveness-only mode).
+Long-running admin tools (`prefetch_views`, `export_duckdb`) emit MCP progress updates, and
+`get_server_status` / `mtgjson://server/config` include `download_progress` snapshots.
+
+### Useful options
+
+```bash
+# Use an existing cache directory
+uv run mtgjson-mcp --cache-dir ./data/mtgjson-cache
+
+# Run without CDN access
+uv run mtgjson-mcp --offline
+
+# Enable stateless Streamable HTTP mode for multi-instance deployments
+uv run mtgjson-mcp --transport http --stateless-http
+
+# Show FastMCP's startup banner and raise log verbosity
+uv run mtgjson-mcp --show-banner --log-level INFO
+```
+
+### Transport Doctor
+
+Use the built-in doctor mode to verify round-trip MCP behavior outside editor tooling:
+
+```bash
+# Probe stdio only
+uv run mtgjson-mcp --doctor stdio
+
+# Probe HTTP only
+uv run mtgjson-mcp --doctor http
+
+# Probe both transports and compare the results
+uv run mtgjson-mcp --doctor both
+```
+
+Doctor mode runs the same small MCP probe set across the selected transport(s)
+and prints JSON output with parity results. This is useful when editor-side MCP
+tooling is flaky and you need to separate client/session issues from server
+behavior.
+
+### Inspect with `@modelcontextprotocol/inspector`
+
+The MCP Inspector is useful when you want to test tools and resources outside of
+editor integration.
+
+Inspect over stdio by letting the Inspector start `mtgjson-mcp` for you:
+
+```bash
+npx @modelcontextprotocol/inspector uv run mtgjson-mcp
+```
+
+Pass server flags after `--`:
+
+```bash
+npx @modelcontextprotocol/inspector -- uv run mtgjson-mcp --offline --log-level INFO
+```
+
+Inspect over HTTP in two terminals:
+
+```bash
+# Terminal 1: start the MCP server
+uv run mtgjson-mcp --transport http --host 127.0.0.1 --port 8000 --path /mcp
+
+# Terminal 2: start the Inspector UI
+npx @modelcontextprotocol/inspector
+```
+
+Then connect in the Inspector UI with:
+
+```text
+transport: streamable-http
+url: http://127.0.0.1:8000/mcp
+```
+
+You can also launch the Inspector from a config file:
+
+```json
+{
+    "mcpServers": {
+        "mtgjson": {
+            "type": "streamable-http",
+            "url": "http://127.0.0.1:8000/mcp"
+        }
+    }
+}
+```
+
+```bash
+npx @modelcontextprotocol/inspector --config ./mcp.json --server mtgjson
+```
+
+The Inspector uses `mcpServers` config files and labels HTTP transport as
+`streamable-http`. If your editor uses `"type": "http"` instead, keep the same
+URL and adapt only the client-specific config shape.
+
+### ASGI Deployment Path (Hosted/Production)
+
+For hosted deployments, middleware, and multi-worker ASGI serving, use the ASGI app factory:
+
+```python
+from fastapi import FastAPI
+
+from mtgjson_sdk.mcp.server import create_asgi_app
+
+mcp_app = create_asgi_app(path="/")
+api = FastAPI(lifespan=mcp_app.lifespan)
+api.mount("/mcp", mcp_app)
+```
+
+Run with Uvicorn/Gunicorn (`uvicorn yourmodule:api --host 0.0.0.0 --port 8000 --workers 4`).
+For horizontally scaled HTTP, prefer stateless mode in CLI/server startup (`--stateless-http`).
+
+### Exposed MCP surface
+
+Resources:
+
+* `mtgjson://server/config`
+* `mtgjson://meta`
+* `mtgjson://views`
+* `mtgjson://cards/{uuid}`
+* `mtgjson://tokens/{uuid}`
+* `mtgjson://sets/{code}`
+* `mtgjson://identifiers/{uuid}`
+* `mtgjson://prices/{uuid}`
+* `mtgjson://skus/{uuid}`
+* `mtgjson://sealed/{uuid}`
+* `mtgjson://enums/{catalog}`
+* `mtgjson://booster/{set_code}/{booster_type}/sheets/{sheet_name}`
+
+Representative tools:
+
+* `search_cards`
+* `search_tokens`
+* `search_sets`
+* `get_set_financial_summary`
+* `find_cards_by_identifier`
+* `get_card_legalities`
+* `list_cards_by_format_status`
+* `get_price_today`
+* `get_price_history`
+* `get_price_trend`
+* `find_cheapest_printing`
+* `list_price_extremes`
+* `list_decks`
+* `list_sealed_products`
+* `get_skus_for_card`
+* `list_booster_types`
+* `open_booster_pack`
+* `open_booster_box`
+* `execute_read_only_sql`
+* `get_server_status`
+* `prefetch_views`
+* `refresh_cache`
+* `export_duckdb`
+
+The SQL tool is intentionally restricted to single-statement `SELECT`, `WITH`, `SHOW`, and `DESCRIBE` queries, and it always enforces a server-side row cap.
+
 ## Development
 
 ```bash
@@ -365,6 +827,13 @@ git clone https://github.com/mtgjson/mtgjson-sdk-python.git
 cd mtgjson-sdk-python
 uv sync --group dev
 uv run pytest
+```
+
+The `dev` group includes test and lint dependencies (including MCP test dependencies).
+If you only want MCP runtime deps without full dev tooling, use:
+
+```bash
+uv sync --extra mcp
 ```
 
 ### Code Style

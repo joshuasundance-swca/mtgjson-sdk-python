@@ -277,38 +277,33 @@ class MtgjsonSDK:
         """Check for new MTGJSON data and reset internal state if stale.
 
         Compares the local cached version against Meta.json on the CDN.
-        If a newer version is available, clears the DuckDB view registry
-        and resets all lazy query objects so the next access re-downloads
-        and re-registers fresh data.
+        If a newer version is available, activates the new cache root,
+        recreates the in-memory DuckDB session in place, and keeps lazy
+        query objects wired to the refreshed connection so long-lived
+        callers can continue using cached handles.
 
         Returns True if data was stale (and state was reset), False if
         already up to date.  Safe to call in long-running processes
         (web servers, bots) to pick up new MTGJSON releases without
         restarting.
         """
-        if not self._cache.is_stale():
+        if not self._cache.is_stale(force_remote=True):
             return False
 
-        # Clear view registry — next access re-registers from fresh parquet
-        self._conn._registered_views.clear()
-
-        # Reset lazy query objects so they re-run _ensure() on next access
-        self._cards = None
-        self._sets = None
-        self._prices = None
-        self._decks = None
-        self._sealed = None
-        self._skus = None
-        self._identifiers = None
-        self._legalities = None
-        self._tokens = None
-        self._enums = None
-        self._booster = None
+        # Reset the in-memory DuckDB session so stale tables/views cannot leak
+        # across releases in long-lived processes while preserving the
+        # Connection wrapper identity for cached query objects.
+        self._conn.reset()
 
         return True
 
-    def export_db(self, path: Path | str) -> Path:
-        """Export all loaded data to a persistent DuckDB file.
+    def export_db(
+        self,
+        path: Path | str,
+        *,
+        views: list[str] | None = None,
+    ) -> Path:
+        """Export loaded data to a persistent DuckDB file.
 
         Creates a standalone ``.duckdb`` file containing all registered
         views and tables.  The exported file can be queried directly with
@@ -317,6 +312,8 @@ class MtgjsonSDK:
 
         Args:
             path: Output path for the ``.duckdb`` file.
+            views: Optional subset of registered views to export. Defaults
+                to every currently registered view.
 
         Returns:
             The resolved output path.
@@ -325,9 +322,19 @@ class MtgjsonSDK:
         if path.exists():
             path.unlink()
         path_str = str(path).replace("\\", "/")
+        requested_views = sorted(
+            set(self._conn._registered_views if views is None else views)
+        )
+        missing = sorted(set(requested_views) - self._conn._registered_views)
+        if missing:
+            raise ValueError(
+                "Cannot export unregistered views: "
+                f"{', '.join(missing)}. Register them first."
+            )
+
         self._conn._conn.execute(f"ATTACH '{path_str}' AS export_db")
         try:
-            for view_name in sorted(self._conn._registered_views):
+            for view_name in requested_views:
                 self._conn._conn.execute(
                     f"CREATE TABLE export_db.{view_name} AS SELECT * FROM {view_name}"
                 )
