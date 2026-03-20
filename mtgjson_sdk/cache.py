@@ -80,12 +80,23 @@ class CacheManager:
             self._client = None
 
     def _local_version(self) -> str | None:
+        return self._active_cache_snapshot()[1]
+
+    def _read_local_version_file(self, version_file: Path) -> str | None:
+        if version_file.exists():
+            value = version_file.read_text(encoding="utf-8").strip()
+            return value or None
+        return None
+
+    def _active_cache_snapshot(self) -> tuple[Path, str | None]:
         version_file = self.cache_dir / "version.txt"
         with self._coordinated_lock(f"version-marker:{version_file.resolve()}"):
-            if version_file.exists():
-                value = version_file.read_text(encoding="utf-8").strip()
-                return value or None
-        return None
+            version = self._read_local_version_file(version_file)
+            if version:
+                version_root = self._version_root(version)
+                if version_root.exists():
+                    return version_root, version
+            return self.cache_dir, version
 
     def _write_text_atomically(self, path: Path, value: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,12 +122,7 @@ class CacheManager:
         return self.cache_dir / "versions" / version
 
     def _active_root(self) -> Path:
-        version = self._local_version()
-        if version:
-            version_root = self._version_root(version)
-            if version_root.exists():
-                return version_root
-        return self.cache_dir
+        return self._active_cache_snapshot()[0]
 
     def _path_for_filename(self, filename: str) -> Path:
         return self._active_root() / filename
@@ -127,7 +133,8 @@ class CacheManager:
     def cache_token(self) -> str:
         """Return a stable identifier for the currently active cache root."""
 
-        return f"{self._active_root()}::{self._local_version() or 'legacy'}"
+        active_root, version = self._active_cache_snapshot()
+        return f"{active_root}::{version or 'legacy'}"
 
     def _thread_lock_for(self, key: str) -> threading.Lock:
         with self._download_locks_lock:
@@ -205,6 +212,7 @@ class CacheManager:
             self._remote_version_checked_at = time.monotonic()
             return self._remote_version
         except (httpx.HTTPError, KeyError, json.JSONDecodeError):
+            self._remote_version = None
             self._remote_version_checked_at = time.monotonic()
             logger.warning("Failed to fetch MTGJSON version from CDN")
             return None
@@ -343,9 +351,9 @@ class CacheManager:
             self._save_version(version)
 
     def _ensure_file(self, filename: str, *, offline_label: str) -> Path:
-        local_version = self._local_version()
+        active_root, local_version = self._active_cache_snapshot()
         remote_version = self.remote_version()
-        local_path = self._path_for_filename(filename)
+        local_path = active_root / filename
 
         if self.offline:
             if local_path.exists():

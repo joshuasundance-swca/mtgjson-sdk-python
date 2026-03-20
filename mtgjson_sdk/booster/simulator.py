@@ -104,8 +104,8 @@ class BoosterSimulator:
                 else self._get_config_from_nested(code)
             )
 
-        if config is not None:
-            self._config_cache[code] = config
+        # Cache both hits and misses so repeated unknown set lookups stay cheap.
+        self._config_cache[code] = config
         return config
 
     def _booster_type_is_usable(self, config: BoosterConfig) -> bool:

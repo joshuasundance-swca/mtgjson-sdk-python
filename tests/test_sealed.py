@@ -44,3 +44,29 @@ def test_sealed_falls_back_to_all_printings_when_sets_are_flat(sdk_offline):
     assert len(products) == 2
     assert all(product["setCode"] == "A25" for product in products)
     assert sdk_offline.sealed.get("sealed-uuid-001")["name"] == "Masters 25 Booster Box"
+
+
+def test_sealed_list_as_dataframe_returns_empty_dataframe_when_sources_lack_sealed(
+    sdk_offline,
+    monkeypatch,
+):
+    sets_without_sealed = [
+        {key: value for key, value in row.items() if key != "sealedProduct"}
+        for row in SAMPLE_SETS
+    ]
+    sdk_offline._conn.register_table_from_data("sets", sets_without_sealed)
+    sdk_offline._conn.register_table_from_data("all_printings", sets_without_sealed)
+    sentinel = object()
+    captured: dict[str, str] = {}
+
+    def fake_execute_df(sql: str, params=None):
+        captured["sql"] = sql
+        return sentinel
+
+    monkeypatch.setattr(sdk_offline._conn, "execute_df", fake_execute_df)
+
+    result = sdk_offline.sealed.list(as_dataframe=True)
+
+    assert result is sentinel
+    assert "sealedProduct" in captured["sql"]
+    assert "WHERE FALSE" in captured["sql"]

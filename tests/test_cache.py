@@ -6,6 +6,7 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from mtgjson_sdk.cache import CacheManager
@@ -150,6 +151,51 @@ def test_remote_version_can_be_forced_to_refresh(tmp_path, monkeypatch):
     assert cache.remote_version() == "5.0.0+old"
     assert cache.remote_version() == "5.0.0+old"
     assert cache.remote_version(force=True) == "5.1.0+new"
+    cache.close()
+
+
+def test_remote_version_failure_clears_stale_cached_value(tmp_path, monkeypatch):
+    cache = CacheManager(tmp_path / "cache", offline=False)
+    calls = 0
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"data": {"version": "5.0.0+old"}}
+
+    class FakeClient:
+        def get(self, _url: str):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return FakeResponse()
+            raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(cache, "_client", FakeClient())
+
+    assert cache.remote_version() == "5.0.0+old"
+    assert cache.remote_version(force=True) is None
+    assert cache.remote_version() is None
+    assert calls == 2
+    cache.close()
+
+
+def test_cache_token_uses_single_snapshot(tmp_path, monkeypatch):
+    cache = CacheManager(tmp_path / "cache", offline=True)
+    calls = 0
+    expected_root = cache._version_root("5.0.0+stable")
+
+    def fake_snapshot() -> tuple[Path, str | None]:
+        nonlocal calls
+        calls += 1
+        return expected_root, "5.0.0+stable"
+
+    monkeypatch.setattr(cache, "_active_cache_snapshot", fake_snapshot)
+
+    assert cache.cache_token() == f"{expected_root}::5.0.0+stable"
+    assert calls == 1
     cache.close()
 
 

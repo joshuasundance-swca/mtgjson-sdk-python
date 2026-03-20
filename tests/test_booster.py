@@ -106,3 +106,27 @@ def test_booster_simulator_clears_cached_configs_when_cache_changes(
     assert second is not None
     assert second["draft"]["sheets"]["common"]["cards"] == {"uuid-b": 1}
     assert len(calls) == 2
+
+
+def test_booster_simulator_caches_missing_configs(tmp_path, monkeypatch):
+    cache = CacheManager(cache_dir=tmp_path, offline=True)
+    conn = Connection(cache)
+    simulator = BoosterSimulator(conn)
+    flat_calls: list[str] = []
+    nested_calls: list[str] = []
+
+    def _fake_flat(_: str):
+        flat_calls.append("called")
+        return None
+
+    def _fake_nested(_: str):
+        nested_calls.append("called")
+        return None
+
+    monkeypatch.setattr(simulator, "_get_config_from_flat", _fake_flat)
+    monkeypatch.setattr(simulator, "_get_config_from_nested", _fake_nested)
+
+    assert simulator._get_booster_config("ZZZ") is None
+    assert simulator._get_booster_config("ZZZ") is None
+    assert len(flat_calls) == 1
+    assert len(nested_calls) == 1

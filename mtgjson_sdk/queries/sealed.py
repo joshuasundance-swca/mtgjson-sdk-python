@@ -102,6 +102,17 @@ class SealedQuery:
             return product
         return None
 
+    def _empty_dataframe(self) -> Any:
+        """Return an empty DataFrame with the sealed-list column shape."""
+
+        return self._conn.execute_df(
+            "SELECT "
+            "CAST(NULL AS VARCHAR) AS code, "
+            "CAST(NULL AS VARCHAR) AS setName, "
+            "CAST(NULL AS VARCHAR) AS sealedProduct "
+            "WHERE FALSE"
+        )
+
     def list(
         self,
         *,
@@ -147,6 +158,8 @@ class SealedQuery:
             if as_dataframe or products or source == "all_printings":
                 return products
 
+        if as_dataframe:
+            return self._empty_dataframe()
         if as_dict:
             return products
         return products
