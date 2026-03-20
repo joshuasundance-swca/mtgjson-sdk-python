@@ -1,0 +1,29 @@
+services:
+  mtgjson-mcp:
+    image: ghcr.io/mtgjson/mtgjson-sdk-python:latest
+    ports:
+      - "8000:8000"
+    environment:
+      MTGJSON_MCP_TRANSPORT: http
+      MTGJSON_MCP_HOST: 0.0.0.0
+      MTGJSON_MCP_PORT: "8000"
+      MTGJSON_MCP_PATH: /mcp
+      MTGJSON_MCP_CACHE_DIR: /data/mtgjson-cache
+      MTGJSON_MCP_LOG_LEVEL: INFO
+    volumes:
+      - mtgjson-cache:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys, urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5); sys.exit(0)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mtgjson-cache:

@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
 import socket
 import subprocess
@@ -58,9 +59,24 @@ logger = logging.getLogger("mtgjson_sdk")
 DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8000
 DEFAULT_HTTP_PATH = "/mcp"
+DEFAULT_DOCKER_HTTP_HOST = "0.0.0.0"
 WARM_PROFILE_BASE = "base"
 WARM_PROFILE_PRICES = "prices"
 WARM_PROFILE_FULL = "full"
+MCP_ENV_PREFIX = "MTGJSON_MCP_"
+ENV_TRANSPORT = f"{MCP_ENV_PREFIX}TRANSPORT"
+ENV_HOST = f"{MCP_ENV_PREFIX}HOST"
+ENV_PORT = f"{MCP_ENV_PREFIX}PORT"
+ENV_PATH = f"{MCP_ENV_PREFIX}PATH"
+ENV_WARM_PROFILE = f"{MCP_ENV_PREFIX}WARM_PROFILE"
+ENV_STATELESS_HTTP = f"{MCP_ENV_PREFIX}STATELESS_HTTP"
+ENV_CACHE_DIR = f"{MCP_ENV_PREFIX}CACHE_DIR"
+ENV_OFFLINE = f"{MCP_ENV_PREFIX}OFFLINE"
+ENV_TIMEOUT = f"{MCP_ENV_PREFIX}TIMEOUT"
+ENV_LOG_LEVEL = f"{MCP_ENV_PREFIX}LOG_LEVEL"
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_FALSE_ENV_VALUES = {"0", "false", "no", "off"}
+_LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
 
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 200
@@ -340,6 +356,83 @@ def _normalize_http_path(path: str) -> str:
     if not normalized.startswith("/"):
         normalized = f"/{normalized}"
     return normalized
+
+
+def _env_text(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _parse_env_bool(name: str, value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in _TRUE_ENV_VALUES:
+        return True
+    if normalized in _FALSE_ENV_VALUES:
+        return False
+    raise ValueError(
+        f"Invalid boolean value for {name}: {value!r}. "
+        "Use one of: 1, 0, true, false, yes, no, on, off."
+    )
+
+
+def _env_bool(name: str) -> bool | None:
+    value = _env_text(name)
+    if value is None:
+        return None
+    return _parse_env_bool(name, value)
+
+
+def _env_int(name: str) -> int | None:
+    value = _env_text(name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid integer value for {name}: {value!r}.") from exc
+
+
+def _env_float(name: str) -> float | None:
+    value = _env_text(name)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid float value for {name}: {value!r}.") from exc
+
+
+def _env_choice(name: str, choices: Sequence[str]) -> str | None:
+    value = _env_text(name)
+    if value is None:
+        return None
+    aliases = {choice.lower(): choice for choice in choices}
+    canonical = aliases.get(value.lower())
+    if canonical is None:
+        raise ValueError(
+            f"Invalid value for {name}: {value!r}. Supported values: "
+            f"{', '.join(choices)}."
+        )
+    return canonical
+
+
+def _env_path(name: str) -> Path | None:
+    value = _env_text(name)
+    if value is None:
+        return None
+    return Path(value).expanduser()
+
+
+def _cli_env_help() -> str:
+    return (
+        "Environment defaults (CLI flags take precedence):\n"
+        f"  {ENV_TRANSPORT}, {ENV_HOST}, {ENV_PORT}, {ENV_PATH},\n"
+        f"  {ENV_WARM_PROFILE}, {ENV_STATELESS_HTTP}, {ENV_CACHE_DIR},\n"
+        f"  {ENV_OFFLINE}, {ENV_TIMEOUT}, {ENV_LOG_LEVEL}"
+    )
 
 
 _WARM_PROFILE_VIEWS: dict[str, tuple[str, ...]] = {
@@ -3491,33 +3584,86 @@ def _run_transport_doctor_sync(args: argparse.Namespace) -> int:
     return 0 if payload["ok"] else 1
 
 
+def _resolve_cli_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    env_transport = _env_choice(ENV_TRANSPORT, ("stdio", "http"))
+    env_host = _env_text(ENV_HOST)
+    env_port = _env_int(ENV_PORT)
+    env_timeout = _env_float(ENV_TIMEOUT)
+
+    args.transport = args.transport or env_transport
+    if args.transport is None:
+        args.transport = "stdio"
+
+    if args.host is None:
+        if env_host is not None:
+            args.host = env_host
+        elif env_transport == "http" and args.transport == "http":
+            args.host = DEFAULT_DOCKER_HTTP_HOST
+        else:
+            args.host = DEFAULT_HTTP_HOST
+    args.port = args.port if args.port is not None else (
+        env_port if env_port is not None else DEFAULT_HTTP_PORT
+    )
+    args.path = args.path or _env_text(ENV_PATH) or DEFAULT_HTTP_PATH
+    args.warm_profile = args.warm_profile or _env_choice(
+        ENV_WARM_PROFILE,
+        (WARM_PROFILE_BASE, WARM_PROFILE_PRICES, WARM_PROFILE_FULL),
+    )
+    args.stateless_http = (
+        args.stateless_http
+        if args.stateless_http is not None
+        else (_env_bool(ENV_STATELESS_HTTP) or False)
+    )
+    args.cache_dir = args.cache_dir or _env_path(ENV_CACHE_DIR)
+    args.offline = (
+        args.offline if args.offline is not None else (_env_bool(ENV_OFFLINE) or False)
+    )
+    args.timeout = args.timeout if args.timeout is not None else (
+        env_timeout if env_timeout is not None else 120.0
+    )
+    args.log_level = args.log_level or _env_choice(ENV_LOG_LEVEL, _LOG_LEVELS)
+    if args.log_level is None:
+        args.log_level = "WARNING"
+
+    if args.port < 0:
+        raise ValueError(f"Invalid value for {ENV_PORT}: {args.port!r}. Use 0 or more.")
+    if args.timeout <= 0:
+        raise ValueError(
+            f"Invalid value for {ENV_TIMEOUT}: {args.timeout!r}. Use a positive number."
+        )
+    args.path = _normalize_http_path(args.path)
+    return args
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build the CLI parser for the MTGJSON MCP server."""
 
     parser = argparse.ArgumentParser(
         prog="mtgjson-mcp",
         description="Run the MTGJSON SDK as a FastMCP server over stdio or HTTP.",
+        epilog=_cli_env_help(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--transport",
         choices=("stdio", "http"),
-        default="stdio",
+        default=None,
         help="Use stdio for local MCP clients or HTTP for hosted access.",
     )
     parser.add_argument(
         "--host",
-        default=DEFAULT_HTTP_HOST,
+        default=None,
         help="HTTP host to bind when using --transport http.",
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=DEFAULT_HTTP_PORT,
+        default=None,
         help="HTTP port to bind when using --transport http.",
     )
     parser.add_argument(
         "--path",
-        default=DEFAULT_HTTP_PATH,
+        default=None,
         help="HTTP path for the MCP endpoint when using --transport http.",
     )
     parser.add_argument(
@@ -3533,6 +3679,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stateless-http",
         action="store_true",
+        default=None,
         help=("Enable stateless Streamable HTTP mode for multi-instance deployments."),
     )
     parser.add_argument(
@@ -3544,18 +3691,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--offline",
         action="store_true",
+        default=None,
         help="Disable CDN downloads and only use cached files.",
     )
     parser.add_argument(
         "--timeout",
         type=float,
-        default=120.0,
+        default=None,
         help="HTTP timeout in seconds for MTGJSON downloads.",
     )
     parser.add_argument(
         "--log-level",
-        choices=("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"),
-        default="WARNING",
+        choices=_LOG_LEVELS,
+        default=None,
         help="Log level written to stderr.",
     )
     parser.add_argument(
@@ -3607,7 +3755,12 @@ def create_asgi_app(
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint for the MTGJSON MCP server."""
 
-    args = build_arg_parser().parse_args(list(argv) if argv is not None else None)
+    parser = build_arg_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    try:
+        args = _resolve_cli_defaults(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     _configure_logging(args.log_level)
 
     try:
@@ -3636,7 +3789,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         transport="http",
         host=args.host,
         port=args.port,
-        path=_normalize_http_path(args.path),
+        path=args.path,
         stateless_http=args.stateless_http,
         show_banner=args.show_banner,
     )

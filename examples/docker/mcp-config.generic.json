@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "mtgjson-docker": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "-v",
+        "mtgjson-cache:/data",
+        "-e",
+        "MTGJSON_MCP_CACHE_DIR=/data/mtgjson-cache",
+        "ghcr.io/mtgjson/mtgjson-sdk-python:latest"
+      ]
+    }
+  }
+}

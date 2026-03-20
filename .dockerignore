@@ -1,0 +1,14 @@
+.git
+.github
+.pytest_cache
+.ruff_cache
+.venv
+.vscode
+__pycache__
+dist
+tests
+.tmp-*
+tmp-*
+examples
+smoke_test.py
+uv.lock

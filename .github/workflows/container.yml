@@ -1,0 +1,176 @@
+name: Container
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build amd64 test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          platforms: linux/amd64
+          tags: mtgjson-sdk:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=test
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=1970-01-01T00:00:00Z
+
+      - name: Verify MCP ownership label
+        run: |
+          test "$(docker inspect --format '{{ index .Config.Labels "io.modelcontextprotocol.server.name" }}' mtgjson-sdk:test)" = "io.github.mtgjson/mtgjson-sdk-python"
+
+      - name: Verify CLI help exposes Docker env defaults
+        run: |
+          docker run --rm mtgjson-sdk:test --help > help.txt
+          grep -q 'MTGJSON_MCP_TRANSPORT' help.txt
+          grep -q 'MTGJSON_MCP_CACHE_DIR' help.txt
+
+  publish-image:
+    name: Publish Container Image
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image-name: ${{ steps.image-name.outputs.value }}
+      version: ${{ steps.version.outputs.value }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Normalize image name
+        id: image-name
+        shell: bash
+        run: |
+          echo "value=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set release version
+        id: version
+        shell: bash
+        run: |
+          echo "value=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set build timestamp
+        id: build-date
+        shell: bash
+        run: |
+          echo "value=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract container metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image-name.outputs.value }}
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-
+
+      - name: Build and push multi-platform image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          sbom: true
+          provenance: mode=max
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.build-date.outputs.value }}
+
+  publish-mcp-registry:
+    name: Publish MCP Registry Metadata
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: publish-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set release metadata in server.json
+        env:
+          IMAGE_NAME: ${{ needs.publish-image.outputs.image-name }}
+          VERSION: ${{ needs.publish-image.outputs.version }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("server.json")
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          payload["version"] = os.environ["VERSION"]
+          image = f"{os.environ['IMAGE_NAME']}:{os.environ['VERSION']}"
+          for package in payload.get("packages", []):
+              if package.get("registryType") == "oci":
+                  package["identifier"] = image
+          path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Install mcp-publisher
+        run: |
+          python -m pip install --upgrade pip mcp-publisher
+
+      - name: Authenticate to MCP Registry
+        run: mcp-publisher login github-oidc
+
+      - name: Publish server metadata
+        run: mcp-publisher publish

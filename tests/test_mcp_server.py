@@ -1236,3 +1236,142 @@ def test_main_doctor_short_circuits_server_run(monkeypatch):
     exit_code = mcp_server.main(["--doctor", "both"])
 
     assert exit_code == 17
+
+
+def test_main_reads_docker_friendly_env_defaults(monkeypatch, tmp_path):
+    import mtgjson_sdk.mcp.server as mcp_server
+
+    seen: dict[str, object] = {}
+    cache_dir = tmp_path / "env-cache"
+
+    class _FakeServer:
+        def run(self, **kwargs):
+            seen["run_kwargs"] = kwargs
+
+    def _fake_create_mcp_server(settings):
+        seen["settings"] = settings
+        return _FakeServer()
+
+    monkeypatch.setenv("MTGJSON_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("MTGJSON_MCP_CACHE_DIR", str(cache_dir))
+    monkeypatch.setenv("MTGJSON_MCP_OFFLINE", "true")
+    monkeypatch.setenv("MTGJSON_MCP_TIMEOUT", "45")
+    monkeypatch.setenv("MTGJSON_MCP_WARM_PROFILE", "prices")
+    monkeypatch.setenv("MTGJSON_MCP_PORT", "8765")
+    monkeypatch.setenv("MTGJSON_MCP_PATH", "cards-mcp")
+    monkeypatch.setenv("MTGJSON_MCP_STATELESS_HTTP", "true")
+    monkeypatch.setenv("MTGJSON_MCP_LOG_LEVEL", "INFO")
+    monkeypatch.setattr(mcp_server, "create_mcp_server", _fake_create_mcp_server)
+
+    exit_code = mcp_server.main([])
+
+    assert exit_code == 0
+    settings = seen["settings"]
+    assert isinstance(settings, mcp_server.MCPServerSettings)
+    assert settings.cache_dir == cache_dir
+    assert settings.offline is True
+    assert settings.timeout == 45.0
+    assert settings.warm_profile == "prices"
+    assert settings.stateless_http is True
+
+    run_kwargs = seen["run_kwargs"]
+    assert run_kwargs["transport"] == "http"
+    assert run_kwargs["host"] == "0.0.0.0"
+    assert run_kwargs["port"] == 8765
+    assert run_kwargs["path"] == "/cards-mcp"
+    assert run_kwargs["stateless_http"] is True
+
+
+def test_main_prefers_explicit_http_host_env_over_container_default(
+    monkeypatch, tmp_path
+):
+    import mtgjson_sdk.mcp.server as mcp_server
+
+    seen: dict[str, object] = {}
+    cache_dir = tmp_path / "env-host-cache"
+
+    class _FakeServer:
+        def run(self, **kwargs):
+            seen["run_kwargs"] = kwargs
+
+    monkeypatch.setenv("MTGJSON_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("MTGJSON_MCP_HOST", "127.0.0.9")
+    monkeypatch.setenv("MTGJSON_MCP_PORT", "8123")
+    monkeypatch.setenv("MTGJSON_MCP_PATH", "/env-mcp")
+    monkeypatch.setenv("MTGJSON_MCP_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(
+        mcp_server,
+        "create_mcp_server",
+        lambda settings: (seen.setdefault("settings", settings), _FakeServer())[1],
+    )
+
+    exit_code = mcp_server.main([])
+
+    assert exit_code == 0
+    run_kwargs = seen["run_kwargs"]
+    assert run_kwargs["transport"] == "http"
+    assert run_kwargs["host"] == "127.0.0.9"
+    assert run_kwargs["port"] == 8123
+    assert run_kwargs["path"] == "/env-mcp"
+
+
+def test_main_cli_flags_override_env_defaults(monkeypatch, tmp_path):
+    import mtgjson_sdk.mcp.server as mcp_server
+
+    seen: dict[str, object] = {}
+    env_cache_dir = tmp_path / "env-cache"
+    cli_cache_dir = tmp_path / "cli-cache"
+
+    class _FakeServer:
+        def run(self, **kwargs):
+            seen["run_kwargs"] = kwargs
+
+    def _fake_create_mcp_server(settings):
+        seen["settings"] = settings
+        return _FakeServer()
+
+    monkeypatch.setenv("MTGJSON_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("MTGJSON_MCP_HOST", "10.0.0.5")
+    monkeypatch.setenv("MTGJSON_MCP_PORT", "9000")
+    monkeypatch.setenv("MTGJSON_MCP_PATH", "env-path")
+    monkeypatch.setenv("MTGJSON_MCP_CACHE_DIR", str(env_cache_dir))
+    monkeypatch.setenv("MTGJSON_MCP_TIMEOUT", "90")
+    monkeypatch.setenv("MTGJSON_MCP_WARM_PROFILE", "prices")
+    monkeypatch.setenv("MTGJSON_MCP_LOG_LEVEL", "ERROR")
+    monkeypatch.setenv("MTGJSON_MCP_STATELESS_HTTP", "true")
+    monkeypatch.setattr(mcp_server, "create_mcp_server", _fake_create_mcp_server)
+
+    exit_code = mcp_server.main(
+        [
+            "--transport",
+            "http",
+            "--host",
+            "127.0.0.7",
+            "--port",
+            "7000",
+            "--path",
+            "cli-path",
+            "--cache-dir",
+            str(cli_cache_dir),
+            "--timeout",
+            "5",
+            "--warm-profile",
+            "base",
+            "--log-level",
+            "DEBUG",
+        ]
+    )
+
+    assert exit_code == 0
+    settings = seen["settings"]
+    assert settings.cache_dir == cli_cache_dir
+    assert settings.timeout == 5.0
+    assert settings.warm_profile == "base"
+    assert settings.stateless_http is True
+
+    run_kwargs = seen["run_kwargs"]
+    assert run_kwargs["transport"] == "http"
+    assert run_kwargs["host"] == "127.0.0.7"
+    assert run_kwargs["port"] == 7000
+    assert run_kwargs["path"] == "/cli-path"
+    assert run_kwargs["stateless_http"] is True

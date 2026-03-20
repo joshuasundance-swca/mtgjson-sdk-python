@@ -401,6 +401,122 @@ Example MCP client configuration:
 }
 ```
 
+### Run with Docker
+
+The published container image supports the same two transports as the local CLI:
+
+* `stdio` is the default and is the best fit for MCP clients that can launch
+  Docker containers directly.
+* HTTP is opt-in for shared, long-running, or remote deployments.
+
+The examples below use:
+
+```bash
+IMAGE=ghcr.io/mtgjson/mtgjson-sdk-python:latest
+```
+
+If you publish the image somewhere else, replace `IMAGE` with your registry tag.
+
+#### Docker stdio (ephemeral)
+
+```bash
+docker run --rm -i $IMAGE
+```
+
+Use `-i` so Docker keeps `STDIN` open for MCP traffic.
+You usually do **not** want `-t` for protocol traffic.
+
+#### Docker stdio with a persistent cache
+
+MTGJSON data is cached locally inside the container.
+For repeated Docker launches, mount a volume so the dataset survives across runs:
+
+```bash
+docker run --rm -i \
+  -v mtgjson-cache:/data \
+  -e MTGJSON_MCP_CACHE_DIR=/data/mtgjson-cache \
+  $IMAGE
+```
+
+Without a persistent cache, each fresh container may need to download data again.
+
+#### Docker HTTP mode
+
+Use HTTP mode when the server should run separately and multiple tools should
+connect to the same MCP endpoint:
+
+```bash
+docker run --rm \
+  -p 8000:8000 \
+  -v mtgjson-cache:/data \
+  -e MTGJSON_MCP_TRANSPORT=http \
+  -e MTGJSON_MCP_HOST=0.0.0.0 \
+  -e MTGJSON_MCP_PORT=8000 \
+  -e MTGJSON_MCP_PATH=/mcp \
+  -e MTGJSON_MCP_CACHE_DIR=/data/mtgjson-cache \
+  $IMAGE
+```
+
+The MCP endpoint is then available at `http://127.0.0.1:8000/mcp`.
+
+Warm profiles are most useful for long-running HTTP containers or repeated runs
+against a shared cache volume:
+
+```bash
+docker run --rm \
+  -p 8000:8000 \
+  -v mtgjson-cache:/data \
+  -e MTGJSON_MCP_TRANSPORT=http \
+  -e MTGJSON_MCP_HOST=0.0.0.0 \
+  -e MTGJSON_MCP_PORT=8000 \
+  -e MTGJSON_MCP_PATH=/mcp \
+  -e MTGJSON_MCP_CACHE_DIR=/data/mtgjson-cache \
+  -e MTGJSON_MCP_WARM_PROFILE=base \
+  $IMAGE
+```
+
+#### Generic MCP client config that shells out to Docker
+
+Some MCP clients have Docker-native UI, while others still model Docker as a
+subprocess launch. This generic config works well for the latter:
+
+```json
+{
+  "mcpServers": {
+    "mtgjson-docker": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "-v",
+        "mtgjson-cache:/data",
+        "-e",
+        "MTGJSON_MCP_CACHE_DIR=/data/mtgjson-cache",
+        "ghcr.io/mtgjson/mtgjson-sdk-python:latest"
+      ]
+    }
+  }
+}
+```
+
+To connect over HTTP instead, start the container separately and point the
+client at the published URL:
+
+```json
+{
+  "mcpServers": {
+    "mtgjson-http": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+See [`examples/docker/README.md`](examples/docker/README.md) for ready-to-copy
+example files.
+
 ### VS Code workspace `.vscode/mcp.json`
 
 VS Code workspace MCP configuration uses a different top-level shape than the
